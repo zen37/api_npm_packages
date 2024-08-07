@@ -5,18 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/gorilla/mux"
 )
 
 func New() http.Handler {
-	router := mux.NewRouter()
-	router.HandleFunc("/package/{package}/{version}", packageHandler)
-	return router
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /package/{package}", invalidPackageHandler)
+	mux.HandleFunc("GET /package/{package}/{version}", packageHandler)
+	return mux
 }
 
 type npmPackageMetaResponse struct {
@@ -36,9 +37,16 @@ type NpmPackageVersion struct {
 }
 
 func packageHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	pkgName := vars["package"]
-	pkgVersion := vars["version"]
+
+	log.Printf("handling get task at %s\n", r.URL.Path)
+
+	pkgName := r.PathValue("package")
+	pkgVersion := r.PathValue("version")
+
+	if pkgName == "" || pkgVersion == "" {
+		http.Error(w, "Invalid request path. Expected format: /package/{name}/{version}", http.StatusBadRequest)
+		return
+	}
 
 	// Validate the version format
 	if !isValidVersion(pkgVersion) {
@@ -185,4 +193,10 @@ func isValidVersion(version string) bool {
 	}
 
 	return true
+}
+
+func invalidPackageHandler(w http.ResponseWriter, r *http.Request) {
+
+	log.Printf("invalid get task at %s\n", r.URL.Path)
+	http.Error(w, "Invalid request path. Expected format: /package/{name}/{version}", http.StatusBadRequest)
 }
