@@ -67,7 +67,6 @@ func packageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string, dependencyMap map[string]string) error {
-
 	pkgMeta, err := fetchPackageMeta(pkg.Name)
 	if err != nil {
 		return err
@@ -77,12 +76,13 @@ func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string, depen
 		return err
 	}
 	pkg.Version = concreteVersion
-	dependencyMap[pkg.Name] = pkg.Version
 
+	// Fetch package details
 	npmPkg, err := fetchPackage(pkg.Name, pkg.Version)
 	if err != nil {
 		return err
 	}
+
 	for dependencyName, dependencyVersionConstraint := range npmPkg.Dependencies {
 		if _, exists := dependencyMap[dependencyName]; !exists {
 			dep := &NpmPackageVersion{Name: dependencyName, Dependencies: map[string]*NpmPackageVersion{}}
@@ -90,8 +90,11 @@ func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string, depen
 			if err := resolveDependencies(dep, dependencyVersionConstraint, dependencyMap); err != nil {
 				return err
 			}
+			// Add to dependencyMap if it's a transitive dependency
+			dependencyMap[dependencyName] = dep.Version
 		}
 	}
+
 	return nil
 }
 
