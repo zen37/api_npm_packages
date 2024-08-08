@@ -17,6 +17,7 @@ func New() http.Handler {
 
 	handleInvalidPath(mux)
 	mux.HandleFunc("GET /package/{package}/{version}", packageHandler)
+
 	return mux
 }
 
@@ -42,13 +43,18 @@ func packageHandler(w http.ResponseWriter, r *http.Request) {
 	pkgVersion := r.PathValue("version")
 
 	rootPkg := &NpmPackageVersion{Name: pkgName, Dependencies: map[string]*NpmPackageVersion{}}
-	if err := resolveDependencies(rootPkg, pkgVersion); err != nil {
+	dependencyMap := make(map[string]string)
+	if err := resolveDependencies(rootPkg, pkgVersion, dependencyMap); err != nil {
 		log.Println(err.Error())
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	stringified, err := json.MarshalIndent(rootPkg, "", "  ")
+	stringified, err := json.MarshalIndent(map[string]interface{}{
+		"name":         rootPkg.Name,
+		"version":      rootPkg.Version,
+		"dependencies": dependencyMap,
+	}, "", "  ")
 	if err != nil {
 		log.Println(err.Error())
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -60,10 +66,9 @@ func packageHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(stringified)
 }
 
-func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string) error {
+func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string, dependencyMap map[string]string) error {
 
 	pkgMeta, err := fetchPackageMeta(pkg.Name)
-	//fmt.Println("pkgMeta, err  ", pkgMeta, err)
 	if err != nil {
 		return err
 	}
@@ -72,16 +77,19 @@ func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string) error
 		return err
 	}
 	pkg.Version = concreteVersion
+	dependencyMap[pkg.Name] = pkg.Version
 
 	npmPkg, err := fetchPackage(pkg.Name, pkg.Version)
 	if err != nil {
 		return err
 	}
 	for dependencyName, dependencyVersionConstraint := range npmPkg.Dependencies {
-		dep := &NpmPackageVersion{Name: dependencyName, Dependencies: map[string]*NpmPackageVersion{}}
-		pkg.Dependencies[dependencyName] = dep
-		if err := resolveDependencies(dep, dependencyVersionConstraint); err != nil {
-			return err
+		if _, exists := dependencyMap[dependencyName]; !exists {
+			dep := &NpmPackageVersion{Name: dependencyName, Dependencies: map[string]*NpmPackageVersion{}}
+			pkg.Dependencies[dependencyName] = dep
+			if err := resolveDependencies(dep, dependencyVersionConstraint, dependencyMap); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
