@@ -8,14 +8,14 @@ import (
 	"log"
 	"net/http"
 	"sort"
-	"strings"
 
 	"github.com/Masterminds/semver/v3"
 )
 
 func New() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /package/{package}", invalidPackageHandler)
+
+	handleInvalidPath(mux)
 	mux.HandleFunc("GET /package/{package}/{version}", packageHandler)
 	return mux
 }
@@ -31,68 +31,27 @@ type npmPackageResponse struct {
 }
 
 type NpmPackageVersion struct {
-	Name         string            `json:"name"`
-	Version      string            `json:"version"`
-	Dependencies map[string]string `json:"dependencies"`
+	Name         string                        `json:"name"`
+	Version      string                        `json:"version"`
+	Dependencies map[string]*NpmPackageVersion `json:"dependencies"`
 }
 
 func packageHandler(w http.ResponseWriter, r *http.Request) {
 
-	log.Printf("handling get task at %s\n", r.URL.Path)
-
 	pkgName := r.PathValue("package")
 	pkgVersion := r.PathValue("version")
 
-	if pkgName == "" || pkgVersion == "" {
-		http.Error(w, "Invalid request path. Expected format: /package/{name}/{version}", http.StatusBadRequest)
+	rootPkg := &NpmPackageVersion{Name: pkgName, Dependencies: map[string]*NpmPackageVersion{}}
+	if err := resolveDependencies(rootPkg, pkgVersion); err != nil {
+		log.Println(err.Error())
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
-	}
-
-	// Validate the version format
-	if !isValidVersion(pkgVersion) {
-		http.Error(w, fmt.Sprintf("Invalid version format: %s.", pkgVersion), http.StatusBadRequest)
-		return
-	}
-
-	pkgMeta, err := fetchPackageMeta(pkgName)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch package metadata: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	concreteVersion, err := highestCompatibleVersion(pkgVersion, pkgMeta)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to find compatible version: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	rootPkg := &NpmPackageVersion{Name: pkgName, Version: concreteVersion, Dependencies: map[string]string{}}
-
-	npmPkg, err := fetchPackage(rootPkg.Name, rootPkg.Version)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to fetch package: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	for dependencyName, dependencyVersionConstraint := range npmPkg.Dependencies {
-		pkgMeta, err := fetchPackageMeta(dependencyName)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to fetch metadata for dependency %s: %v", dependencyName, err), http.StatusInternalServerError)
-			return
-		}
-
-		concreteVersion, err := highestCompatibleVersion(dependencyVersionConstraint, pkgMeta)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to find compatible version for dependency %s: %v", dependencyName, err), http.StatusInternalServerError)
-			return
-		}
-
-		rootPkg.Dependencies[dependencyName] = concreteVersion
 	}
 
 	stringified, err := json.MarshalIndent(rootPkg, "", "  ")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to marshal response: %v", err), http.StatusInternalServerError)
+		log.Println(err.Error())
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -101,27 +60,44 @@ func packageHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(stringified)
 }
 
+func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string) error {
+
+	pkgMeta, err := fetchPackageMeta(pkg.Name)
+	//fmt.Println("pkgMeta, err  ", pkgMeta, err)
+	if err != nil {
+		return err
+	}
+	concreteVersion, err := highestCompatibleVersion(versionConstraint, pkgMeta)
+	if err != nil {
+		return err
+	}
+	pkg.Version = concreteVersion
+
+	npmPkg, err := fetchPackage(pkg.Name, pkg.Version)
+	if err != nil {
+		return err
+	}
+	for dependencyName, dependencyVersionConstraint := range npmPkg.Dependencies {
+		dep := &NpmPackageVersion{Name: dependencyName, Dependencies: map[string]*NpmPackageVersion{}}
+		pkg.Dependencies[dependencyName] = dep
+		if err := resolveDependencies(dep, dependencyVersionConstraint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func highestCompatibleVersion(constraintStr string, versions *npmPackageMetaResponse) (string, error) {
-	// Parse the version constraint
 	constraint, err := semver.NewConstraint(constraintStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid constraint: %w", err)
-		//return "", err
+		return "", err
 	}
-
-	// Filter versions based on the constraint
 	filtered := filterCompatibleVersions(constraint, versions)
-
-	// Sort filtered versions in ascending order
-	sort.Sort(sort.Reverse(filtered))
-
-	// Check if there are any compatible versions
+	sort.Sort(filtered)
 	if len(filtered) == 0 {
 		return "", errors.New("no compatible versions found")
 	}
-
-	// Return the highest compatible version
-	return filtered[0].String(), nil
+	return filtered[len(filtered)-1].String(), nil
 }
 
 func filterCompatibleVersions(constraint *semver.Constraints, pkgMeta *npmPackageMetaResponse) semver.Collection {
@@ -158,6 +134,7 @@ func fetchPackage(name, version string) (*npmPackageResponse, error) {
 }
 
 func fetchPackageMeta(p string) (*npmPackageMetaResponse, error) {
+
 	resp, err := http.Get(fmt.Sprintf("https://registry.npmjs.org/%s", p))
 	if err != nil {
 		return nil, err
@@ -173,30 +150,19 @@ func fetchPackageMeta(p string) (*npmPackageMetaResponse, error) {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, err
 	}
+
 	return &parsed, nil
 }
 
-// isValidVersion checks if the provided version string is a valid semantic version.
-func isValidVersion(version string) bool {
-
-	version = strings.Trim(version, " #?/") // Adjust as needed
-
-	_, err := semver.NewVersion(version)
-	if err != nil {
-		return false
-	}
-
-	// Custom validation: Ensure the version string contains at least two dots
-	parts := strings.Split(version, ".")
-	if len(parts) < 3 {
-		return false
-	}
-
-	return true
+func handleInvalidPath(mux *http.ServeMux) {
+	mux.HandleFunc("/", invalidPath)
+	mux.HandleFunc("/package", invalidPath)
+	mux.HandleFunc("/package/", invalidPath)
+	mux.HandleFunc("/package/{package}", invalidPath)
 }
 
-func invalidPackageHandler(w http.ResponseWriter, r *http.Request) {
+func invalidPath(w http.ResponseWriter, r *http.Request) {
 
-	log.Printf("invalid get task at %s\n", r.URL.Path)
-	http.Error(w, "Invalid request path. Expected format: /package/{name}/{version}", http.StatusBadRequest)
+	log.Printf("invalid request path: %s\n", r.URL.Path)
+	http.Error(w, fmt.Sprintf("Invalid request path. Expected format: /package/{name}/{version}, but got %s", r.URL.Path), http.StatusBadRequest)
 }
